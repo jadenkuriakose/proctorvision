@@ -1,0 +1,8 @@
+opencv-python>=4.8.0
+mediapipe>=0.10.0
+ray>=2.9.0
+fastapi>=0.110.0
+uvicorn>=0.27.0
+streamlit>=1.32.0
+requests>=2.31.0
+numpy>=1.24.0
