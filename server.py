@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 frameCounter = 0
 workerPool = None
-numWorkers = int(os.getenv("behaviorWorkers", os.getenv("BEHAVIOR_WORKERS", "1")))
+numWorkers = int(os.getenv("BEHAVIOR_WORKERS", "1"))
 
 
 @asynccontextmanager

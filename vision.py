@@ -19,26 +19,32 @@ faceDetector = mpFace.FaceDetection(
     min_detection_confidence=0.60
 )
 
-modelPath = os.getenv("phoneModelPath", os.getenv("PHONE_MODEL_PATH", "yolov8n.pt"))
-phoneImgSize = int(os.getenv("phoneImgSize", os.getenv("PHONE_IMG_SIZE", "416")))
-phoneConfThreshold = float(os.getenv("phoneConfThreshold", os.getenv("PHONE_CONF_THRESHOLD", "0.30")))
-phoneCheckInterval = int(os.getenv("phoneCheckInterval", os.getenv("PHONE_CHECK_INTERVAL", "3")))
-useGpu = os.getenv("useGpu", os.getenv("USE_GPU", "auto")).lower()
-useOnnx = modelPath.endswith(".onnx")
+modelPath = os.getenv("PHONE_MODEL_PATH", "yolov8n.pt")
+phoneImgSize = int(os.getenv("PHONE_IMG_SIZE", "320"))
+phoneConfThreshold = float(os.getenv("PHONE_CONF_THRESHOLD", "0.30"))
+phoneCheckInterval = int(os.getenv("PHONE_CHECK_INTERVAL", "8"))
+phoneHoldFrames = int(os.getenv("PHONE_HOLD_FRAMES", "12"))
+faceCheckInterval = int(os.getenv("FACE_CHECK_INTERVAL", "3"))
+faceHoldFrames = int(os.getenv("FACE_HOLD_FRAMES", "8"))
+useGpu = os.getenv("USE_GPU", "auto").lower()
+phoneClassIds = [int(value.strip()) for value in os.getenv("PHONE_CLASS_IDS", "67").split(",") if value.strip()]
 
+gazeDiffThreshold = float(os.getenv("GAZE_DIFF_THRESHOLD", "34.0"))
+minFaceWidth = int(os.getenv("MIN_FACE_WIDTH", "70"))
+minFaceHeight = int(os.getenv("MIN_FACE_HEIGHT", "70"))
+
+useOnnx = modelPath.endswith(".onnx")
 recentFaceSeen = deque(maxlen=20)
 recentGazeAway = deque(maxlen=24)
 
 lastFaceBox = None
-lastPhoneCheckFrame = -100
-lastPhoneVisible = False
 lastFaceSeenFrame = -100
-lastPhoneBoxes = []
+lastFaceCheckFrame = -100
 
-gazeDiffThreshold = 34.0
-minFaceWidth = 80
-minFaceHeight = 80
-faceGraceFrames = 8
+lastPhoneVisible = False
+lastPhoneSeenFrame = -100
+lastPhoneCheckFrame = -100
+lastPhoneBoxes = []
 
 
 def getModelDevice():
@@ -65,6 +71,7 @@ phoneModel = YOLO(modelPath, task="detect")
 
 if not useOnnx:
     phoneModel.to(modelDevice)
+
     try:
         phoneModel.fuse()
     except Exception:
@@ -93,6 +100,39 @@ def detectFace(frame):
     return (x, y, boxWidth, boxHeight)
 
 
+def getFaceBox(frame, frameIndex):
+    global lastFaceBox
+    global lastFaceSeenFrame
+    global lastFaceCheckFrame
+
+    faceWasChecked = False
+
+    if frameIndex - lastFaceCheckFrame >= faceCheckInterval:
+        faceWasChecked = True
+        faceBox = detectFace(frame)
+        lastFaceCheckFrame = frameIndex
+
+        if faceBox is not None:
+            lastFaceBox = faceBox
+            lastFaceSeenFrame = frameIndex
+            recentFaceSeen.append(1)
+            return faceBox, 1, faceWasChecked
+
+        if frameIndex - lastFaceSeenFrame <= faceHoldFrames:
+            recentFaceSeen.append(1)
+            return lastFaceBox, 1, faceWasChecked
+
+        recentFaceSeen.append(0)
+        return None, 0, faceWasChecked
+
+    if frameIndex - lastFaceSeenFrame <= faceHoldFrames and lastFaceBox is not None:
+        recentFaceSeen.append(1)
+        return lastFaceBox, 1, faceWasChecked
+
+    recentFaceSeen.append(0)
+    return None, 0, faceWasChecked
+
+
 def detectPhone(frame):
     global lastPhoneBoxes
 
@@ -116,15 +156,43 @@ def detectPhone(frame):
         cls = int(box.cls[0])
         conf = float(box.conf[0])
 
-        if cls == 67 and conf >= phoneConfThreshold:
+        if cls in phoneClassIds and conf >= phoneConfThreshold:
             xyxy = box.xyxy[0].detach().cpu().numpy().tolist()
             boxes.append({
+                "classId": cls,
                 "conf": round(conf, 3),
                 "xyxy": [round(float(value), 2) for value in xyxy],
             })
 
     lastPhoneBoxes = boxes
     return len(boxes) > 0
+
+
+def getPhoneSignal(frame, frameIndex):
+    global lastPhoneVisible
+    global lastPhoneSeenFrame
+    global lastPhoneCheckFrame
+    global lastPhoneBoxes
+
+    phoneWasChecked = False
+
+    if frameIndex - lastPhoneCheckFrame >= phoneCheckInterval:
+        phoneWasChecked = True
+        phoneVisible = detectPhone(frame)
+        lastPhoneCheckFrame = frameIndex
+
+        if phoneVisible:
+            lastPhoneVisible = True
+            lastPhoneSeenFrame = frameIndex
+            return True, phoneWasChecked
+
+        lastPhoneVisible = False
+
+    if frameIndex - lastPhoneSeenFrame <= phoneHoldFrames:
+        return True, phoneWasChecked
+
+    lastPhoneBoxes = []
+    return False, phoneWasChecked
 
 
 def detectGaze(frame, faceBox):
@@ -157,49 +225,26 @@ def detectGaze(frame, faceBox):
 
 
 def processFrame(frame, frameIndex):
-    global lastFaceBox
-    global lastPhoneCheckFrame
-    global lastPhoneVisible
-    global lastFaceSeenFrame
-
     startTime = time.time()
 
-    faceBox = detectFace(frame)
-    faceCount = 1 if faceBox is not None else 0
+    faceBox, faceCount, faceWasChecked = getFaceBox(frame, frameIndex)
+    gazeAway, gazeDiff = detectGaze(frame, faceBox)
+    phoneDetected, phoneWasChecked = getPhoneSignal(frame, frameIndex)
 
-    if faceBox is not None:
-        lastFaceBox = faceBox
-        lastFaceSeenFrame = frameIndex
-        recentFaceSeen.append(1)
-        activeFaceBox = faceBox
-    else:
-        if frameIndex - lastFaceSeenFrame <= faceGraceFrames:
-            recentFaceSeen.append(1)
-            activeFaceBox = lastFaceBox
-        else:
-            recentFaceSeen.append(0)
-            activeFaceBox = None
-
-    gazeAway, gazeDiff = detectGaze(frame, activeFaceBox)
     recentGazeAway.append(1 if gazeAway else 0)
-
-    phoneWasChecked = False
-
-    if frameIndex - lastPhoneCheckFrame >= phoneCheckInterval:
-        lastPhoneVisible = detectPhone(frame)
-        lastPhoneCheckFrame = frameIndex
-        phoneWasChecked = True
 
     return {
         "frameNum": frameIndex,
         "timestamp": int(time.time() * 1000),
         "faceCount": faceCount,
+        "faceWasChecked": faceWasChecked,
         "gazeAway": gazeAway,
         "gazeAwayAngle": gazeDiff,
-        "phoneDetected": bool(lastPhoneVisible),
+        "phoneDetected": phoneDetected,
         "phoneWasChecked": phoneWasChecked,
         "phoneBoxes": lastPhoneBoxes,
         "modelDevice": str(modelDevice),
         "modelPath": modelPath,
+        "phoneImgSize": phoneImgSize,
         "visionTimeMs": round((time.time() - startTime) * 1000, 2),
     }

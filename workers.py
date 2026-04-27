@@ -188,6 +188,10 @@ class BehaviorWorker:
         self.recentFaceSeen.clear()
         self.recentPhoneDetected.clear()
         self.recentMultipleFaces.clear()
+        self.lastGazeAwayEvent = 0
+        self.lastFaceMissingEvent = 0
+        self.lastPhoneEvent = 0
+        self.lastMultipleFacesEvent = 0
         return {"status": "reset"}
 
 
